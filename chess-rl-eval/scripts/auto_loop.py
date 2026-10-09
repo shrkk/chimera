@@ -39,6 +39,29 @@ def save_config(config: dict, config_path: pathlib.Path) -> None:
         yaml.safe_dump(config, f, default_flow_style=False)
 
 
+def sync_to_github(round_num: int, target_pass: float) -> None:
+    """Commit results and push to GitHub so progress can be inspected remotely."""
+    try:
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", f"https://{token}@github.com/shrkk/chimera.git"],
+                cwd=str(PROJECT_ROOT),
+                check=False,
+                capture_output=True,
+            )
+        subprocess.run(["git", "add", "results/", "config.yaml"], cwd=str(PROJECT_ROOT), check=False)
+        commit_msg = f"chore(eval): auto-loop round {round_num} results (Pass@1: {target_pass*100:.1f}%)"
+        subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(PROJECT_ROOT), check=False, capture_output=True)
+        push_res = subprocess.run(["git", "push", "origin", "main"], cwd=str(PROJECT_ROOT), check=False, capture_output=True)
+        if push_res.returncode == 0:
+            logger.info("✔ Successfully pushed Round %d results to GitHub!", round_num)
+        else:
+            logger.info("ℹ Git push skipped (no write credentials on pod). Results saved locally in results/.")
+    except Exception as e:
+        logger.warning("Git sync warning: %s", e)
+
+
 def run_command(cmd: list[str], description: str) -> bool:
     logger.info("Executing: %s", description)
     logger.info("Command: %s", " ".join(cmd))
@@ -156,7 +179,10 @@ def main():
         with open(history_file, "w") as f:
             json.dump(history, f, indent=2)
 
-        # ── Step 4: Adaptive Parameter Tuning ────────────────────────────────
+        # ── Step 4: Auto-sync results to GitHub ──────────────────────────────
+        sync_to_github(round_num, target_band_pass)
+
+        # ── Step 5: Adaptive Parameter Tuning ────────────────────────────────
         if target_band_pass >= args.target_pass:
             logger.info("🎯 Target gate achieved! (%.1f%% >= %.1f%%) Loop complete!", target_band_pass * 100, args.target_pass * 100)
             break
