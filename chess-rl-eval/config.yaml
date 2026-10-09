@@ -1,0 +1,88 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# chess-rl-eval/config.yaml
+# Central configuration consumed by all training, eval and dataset scripts.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  base_model: "Qwen/Qwen2.5-Coder-7B-Instruct"
+  checkpoint_dir: "./checkpoints"
+  max_new_tokens: 256        # hard cap on full generation
+  max_cot_tokens: 80         # verbosity penalty kicks in above this
+  temperature: 0.7
+  top_p: 0.9
+
+# ── GRPO Training ─────────────────────────────────────────────────────────────
+grpo:
+  group_size: 4              # G completions sampled per board state
+  learning_rate: 5.0e-6
+  beta_kl: 0.04              # KL penalty coefficient
+  clip_epsilon: 0.2          # PPO clipping range
+  episodes: 5000
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  warmup_steps: 100
+  save_every: 500            # checkpoint interval (episodes)
+  stockfish_threads: 4
+  stockfish_depth: 12        # depth for reward shaping evals
+
+# ── Reward Shaping ─────────────────────────────────────────────────────────────
+reward:
+  gamma: 0.99                # PBRS discount factor
+  step_penalty: -0.005       # anti-stalling per move
+  repetition_penalty: -0.30  # repeated board state penalty
+  token_penalty_coef: -0.002 # per excess token above max_cot_tokens
+  terminal_win: 2.0          # puzzle solved
+  terminal_loss: -1.0        # blunder / deviated from solution
+  terminal_illegal: -1.5     # illegal token output
+
+# ── Neuro-Symbolic Verifier ────────────────────────────────────────────────────
+verifier:
+  num_candidates: 3          # top-K moves the LLM proposes
+  rank_prior_penalty: 15.0   # score penalty per lower rank slot
+  piece_values:
+    pawn: 100
+    knight: 320
+    bishop: 330
+    rook: 500
+    queen: 900
+    king: 20000
+
+# ── Stockfish Cache ────────────────────────────────────────────────────────────
+cache:
+  db_path: "./cache/stockfish_cache.db"
+  max_entries: 2_000_000
+  stockfish_binary: "stockfish"   # must be on PATH
+
+# ── Datasets ──────────────────────────────────────────────────────────────────
+datasets:
+  puzzle_count: 1200
+  puzzle_output: "./datasets/puzzles.jsonl"
+  lichess_puzzle_url: "https://database.lichess.org/lichess_db_puzzle.csv.zst"
+  elo_min: 800
+  elo_max: 1700
+  tier2_sample_count: 1200       # stratified across Elo bands
+  pgn2fen_samples: 100
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  # Tier 1 – PGN2FEN
+  pgn2fen_bench_repo: "AidanCooper/pgn2fen-benchmark"
+  pgn2fen_plies: [10, 20, 30, 40]
+  pgn2fen_pass_threshold: 0.95   # ≥ 95% exact-match at ply ≤ 30
+
+  # Tier 2 – Lichess Puzzles
+  tier2_pass_threshold_low: 0.65  # 1100–1400 Elo band
+  tier2_pass_threshold_high: 0.40 # 1400–1700 Elo band
+
+  # Tier 3 – Maia match
+  maia_opponent: "maia-1300"
+  maia_games: 50
+  maia_pass_win_rate: 0.50
+  maia_pass_lmcr: 1.00           # 100 % legal-move compliance rate
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  log_dir: "./logs"
+  wandb_project: "chess-rl-eval"  # set WANDB_API_KEY env var to enable
