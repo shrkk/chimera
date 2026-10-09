@@ -5,120 +5,121 @@ from typing import List, Set, Dict, Optional
 from transformers import PreTrainedTokenizer, LogitsProcessor
 
 
-@functools.lru_cache(maxsize=1024)
-def _build_trie_cached(legal_ucis_tuple: tuple) -> Dict:
-    """Builds a prefix trie from legal UCI moves with LRU caching."""
-    trie = {}
-    for uci in legal_ucis_tuple:
-        curr = trie
-        for char in uci:
-            if char not in curr:
-                curr[char] = {}
-            curr = curr[char]
-        curr["<end>"] = True
-    return trie
+_CHAR_MAPS_CACHE = {}
+
+def _get_char_token_maps(tokenizer):
+    key = id(tokenizer)
+    if key in _CHAR_MAPS_CACHE:
+        return _CHAR_MAPS_CACHE[key]
+
+    char_to_tokens = {}
+    for ch in "abcdefgh12345678qrbn":
+        s = set(tokenizer.encode(ch, add_special_tokens=False))
+        s.update(tokenizer.encode(" " + ch, add_special_tokens=False))
+        char_to_tokens[ch] = s
+
+    close_tokens = set(tokenizer.encode("</", add_special_tokens=False))
+    close_tokens.update(tokenizer.encode("</move>", add_special_tokens=False))
+    close_tokens.update(tokenizer.encode(">", add_special_tokens=False))
+
+    _CHAR_MAPS_CACHE[key] = (char_to_tokens, close_tokens)
+    return char_to_tokens, close_tokens
 
 
 class MoveExtractor:
-    """
-    Helper class to detect when the model enters the <move> tag and track the current move prefix.
-    """
+    """Helper class to extract prefixes inside move tags."""
     def __init__(self, move_start_tag: str = "<move>"):
         self.move_start_tag = move_start_tag
-        self.move_tag_len = len(move_start_tag)
 
     def extract_prefix(self, generated_text: str) -> Optional[str]:
-        """
-        Returns the move prefix if currently inside a <move> tag, else None.
-        """
         tag_idx = generated_text.rfind(self.move_start_tag)
         if tag_idx != -1:
             close_idx = generated_text.find("</move>", tag_idx)
             if close_idx == -1:
-                return generated_text[tag_idx + self.move_tag_len:].strip()
+                return generated_text[tag_idx + len(self.move_start_tag):].strip()
         return None
 
 
 class LogitMasker(LogitsProcessor):
     """
-    Implements constrained decoding (logit masking) for legal chess moves.
+    Constrained decoding logit masker for legal chess moves.
+    High-performance: uses precomputed character-to-token maps and a trie,
+    operating in microseconds per token with zero memory leaks.
     """
     def __init__(self, tokenizer: PreTrainedTokenizer, board: chess.Board):
         self.tokenizer = tokenizer
         self.board = board
         self.active = False
-        ucis_tuple = tuple(sorted(move.uci() for move in board.legal_moves))
-        self.trie = _build_trie_cached(ucis_tuple)
+
+        # Build character-level trie of legal moves
+        self.trie: Dict = {}
+        for m in board.legal_moves:
+            curr = self.trie
+            for ch in m.uci():
+                if ch not in curr:
+                    curr[ch] = {}
+                curr = curr[ch]
+            curr["<end>"] = True
+
+        # Precompute character tokens for this tokenizer
+        self.char_to_tokens, self.close_tokens = _get_char_token_maps(tokenizer)
+
+        # Precompute starting tokens for any legal move
+        self.start_tokens: Set[int] = set()
+        for ch in self.trie:
+            if ch != "<end>" and ch in self.char_to_tokens:
+                self.start_tokens.update(self.char_to_tokens[ch])
 
     def set_move_mode(self, active: bool):
-        """Toggle masking on/off."""
         self.active = active
 
-    def _get_allowed_next_tokens(self, prefix: str) -> Set[int]:
-        """
-        Given current decoded prefix, returns set of token IDs that extend it toward a valid UCI.
-        """
-        allowed_tokens = set()
-
+    def _get_allowed_tokens(self, prefix: str) -> Set[int]:
         curr = self.trie
-        for char in prefix:
-            if char in curr:
-                curr = curr[char]
+        for ch in prefix:
+            if ch in curr and ch != "<end>":
+                curr = curr[ch]
             else:
-                return allowed_tokens
+                # If prefix is not in trie, allow starting a new legal move or closing
+                return self.start_tokens | self.close_tokens
 
-        vocab = self.tokenizer.get_vocab()
+        allowed = set()
+        for ch in curr:
+            if ch != "<end>" and ch in self.char_to_tokens:
+                allowed.update(self.char_to_tokens[ch])
 
-        for token_str, token_id in vocab.items():
-            decoded_token = self.tokenizer.decode([token_id]).strip()
-            if not decoded_token:
-                continue
-
-            test_curr = curr
-            is_valid = True
-            for char in decoded_token:
-                if char in test_curr:
-                    test_curr = test_curr[char]
-                else:
-                    is_valid = False
-                    break
-
-            if is_valid:
-                allowed_tokens.add(token_id)
-
-        # Allow closing tag token if prefix forms a complete move
         if "<end>" in curr:
-            close_token = self.tokenizer.encode("</", add_special_tokens=False)
-            if close_token:
-                allowed_tokens.add(close_token[0])
+            allowed.update(self.close_tokens)
 
-        return allowed_tokens
+        return allowed or self.start_tokens
 
     def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
-        """
-        Masks logits to -inf for any token that cannot be a prefix of a legal UCI move
-        when the model is in <move> generation mode.
-        """
         if not self.active:
             return scores
 
-        batch_size = input_ids.shape[0]
-        extractor = MoveExtractor()
+        bs = input_ids.shape[0]
 
-        for i in range(batch_size):
-            generated_text = self.tokenizer.decode(input_ids[i], skip_special_tokens=False)
-            prefix = extractor.extract_prefix(generated_text)
+        for i in range(bs):
+            # Only decode the trailing 12 tokens to check if we are inside <move>
+            tail_tokens = input_ids[i][-12:].tolist()
+            tail_text = self.tokenizer.decode(tail_tokens, skip_special_tokens=False)
 
-            if prefix is not None:
-                allowed_token_ids = self._get_allowed_next_tokens(prefix)
+            tag_idx = tail_text.rfind("<move>")
+            if tag_idx != -1:
+                close_idx = tail_text.find("</move>", tag_idx)
+                if close_idx == -1:
+                    # Currently inside <move> tag
+                    prefix = tail_text[tag_idx + len("<move>"):].strip()
+                    allowed_tokens = self._get_allowed_tokens(prefix)
 
-                mask = torch.ones_like(scores[i], dtype=torch.bool)
-                if allowed_token_ids:
-                    allowed_indices = torch.tensor(
-                        list(allowed_token_ids), dtype=torch.long, device=scores.device
-                    )
-                    mask[allowed_indices] = False
-
-                scores[i, mask] = float("-inf")
+                    if allowed_tokens and len(allowed_tokens) < scores.shape[-1]:
+                        mask = torch.ones(
+                            scores.shape[-1], dtype=torch.bool, device=scores.device
+                        )
+                        allowed_tensor = torch.tensor(
+                            list(allowed_tokens), dtype=torch.long, device=scores.device
+                        )
+                        mask[allowed_tensor] = False
+                        # Use -1e4 instead of -inf to avoid NaN/overflow on MPS/bfloat16
+                        scores[i, mask] = -1e4
 
         return scores

@@ -1,20 +1,28 @@
+import os
 import argparse
 import copy
 import json
 import logging
 import pathlib
+import sys
+
+# Disable hard upper allocation cap on Apple Silicon unified memory
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
 import torch
 import yaml
 import chess
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-# Dynamic imports to avoid crashing if dependencies are missing during script compilation
-try:
-    from src.env.chess_gym import ChessGym
-    from src.models.logit_masker import LogitMasker, MoveExtractor
-    from src.env.state_encoder import StateEncoder, parse_candidates
-except ImportError:
-    pass
+# Ensure project root is on sys.path
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.env.chess_gym import ChessGym
+from src.models.logit_masker import LogitMasker, MoveExtractor
+from src.env.state_encoder import StateEncoder, parse_candidates
+from src.verifier.tactical_verifier import select_best_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +38,8 @@ def compute_grpo_loss(
 ) -> torch.Tensor:
     """
     Computes GRPO surrogate loss with group advantage normalization.
-    Eliminates the separate critic network to reduce training memory by ~45%.
+    Optimized for low VRAM: slices logits to generated tokens only,
+    evaluates ref model under inference_mode and frees its memory early.
     """
     device = policy_model.device
     rewards = rewards.to(device)
@@ -44,47 +53,50 @@ def compute_grpo_loss(
     advantages = (rewards - mean_reward) / (std_reward + 1e-8)
     advantages = advantages.view(-1)  # Flatten to match batch dimension
 
-    # 2. Forward pass for active and reference log probs
-    policy_outputs = policy_model(input_ids=input_ids)
-    policy_logits = policy_outputs.logits
-
-    with torch.inference_mode():
-        ref_outputs = ref_model(input_ids=input_ids)
-        ref_logits = ref_outputs.logits
-
-    shift_policy_logits = policy_logits[..., :-1, :].contiguous()
-    shift_ref_logits = ref_logits[..., :-1, :].contiguous()
     shift_labels = input_ids[..., 1:].contiguous()
     shift_action_masks = action_masks[..., 1:].contiguous()
 
-    loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+    # Find earliest generated token to avoid backpropping through prompt
+    active_indices = (shift_action_masks.sum(dim=0) > 0).nonzero()
+    start_idx = active_indices[0].item() if len(active_indices) > 0 else 0
 
-    policy_log_probs = -loss_fct(
-        shift_policy_logits.view(-1, shift_policy_logits.size(-1)),
-        shift_labels.view(-1),
-    )
-    policy_log_probs = policy_log_probs.view(shift_labels.size())
+    sliced_labels = shift_labels[:, start_idx:].contiguous()
+    sliced_masks = shift_action_masks[:, start_idx:].contiguous()
 
-    ref_log_probs = -loss_fct(
-        shift_ref_logits.view(-1, shift_ref_logits.size(-1)),
-        shift_labels.view(-1),
-    )
-    ref_log_probs = ref_log_probs.view(shift_labels.size())
+    # 2. Reference model pass in inference_mode, then free its tensors
+    with torch.inference_mode():
+        ref_outputs = ref_model(input_ids=input_ids)
+        ref_logits = ref_outputs.logits[:, start_idx:-1, :].contiguous()
+        ref_log_probs = ref_logits.log_softmax(dim=-1)
+        token_ref_log_probs = torch.gather(
+            ref_log_probs, -1, sliced_labels.unsqueeze(-1)
+        ).squeeze(-1)
+        del ref_outputs, ref_logits, ref_log_probs
+        if device.type == "mps":
+            torch.mps.empty_cache()
 
-    # 3. Token-level KL divergence approximation: exp(ref - policy) - (ref - policy) - 1
-    diff = ref_log_probs - policy_log_probs
+    # 3. Active policy model pass
+    policy_outputs = policy_model(input_ids=input_ids)
+    policy_logits = policy_outputs.logits[:, start_idx:-1, :].contiguous()
+    policy_log_probs = policy_logits.log_softmax(dim=-1)
+    token_log_probs = torch.gather(
+        policy_log_probs, -1, sliced_labels.unsqueeze(-1)
+    ).squeeze(-1)
+
+    # 4. Token-level KL divergence approximation: exp(ref - policy) - (ref - policy) - 1
+    diff = token_ref_log_probs - token_log_probs
     kl = torch.exp(diff) - diff - 1.0
 
-    # 4. GRPO policy gradient loss with advantage broadcasting
-    ratio = torch.exp(policy_log_probs - policy_log_probs.detach())
+    # 5. GRPO policy gradient loss with advantage broadcasting
+    ratio = torch.exp(token_log_probs - token_log_probs.detach())
     adv_broadcast = advantages.unsqueeze(-1)
     surr1 = ratio * adv_broadcast
     surr2 = torch.clamp(ratio, 1.0 - 0.2, 1.0 + 0.2) * adv_broadcast
     policy_loss = -torch.min(surr1, surr2) + (beta_kl * kl)
 
-    # 5. Mask out prompt and padding tokens
-    masked_loss = policy_loss * shift_action_masks
-    return masked_loss.sum() / (shift_action_masks.sum() + 1e-8)
+    # 6. Mask out prompt and padding tokens
+    masked_loss = policy_loss * sliced_masks
+    return masked_loss.sum() / (sliced_masks.sum() + 1e-8)
 
 
 class GRPOTrainer:
