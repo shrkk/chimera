@@ -183,6 +183,11 @@ class GRPOTrainer:
         self.learning_rate = float(grpo_cfg.get("learning_rate", 5e-6))
         self.episodes = grpo_cfg.get("episodes", 5000)
         self.save_every = grpo_cfg.get("save_every", 500)
+        self.checkpoint_dir = pathlib.Path(
+            grpo_cfg.get("checkpoint_dir", "./checkpoints")
+        )
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_file = self.checkpoint_dir / "training_metrics.jsonl"
 
         trainable_params = [p for p in self.policy_model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
@@ -339,16 +344,25 @@ class GRPOTrainer:
                 batch_rewards.mean().item(),
             )
 
+            metrics_entry = {
+                "episode": episode,
+                "loss": round(float(loss.item()), 5),
+                "mean_reward": round(float(batch_rewards.mean().item()), 5),
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+            }
+            try:
+                with open(self.metrics_file, "a") as f:
+                    f.write(json.dumps(metrics_entry) + "\n")
+            except Exception as e:
+                logger.warning("Failed to write training metrics: %s", e)
+
             if episode % self.save_every == 0:
                 self.save_checkpoint(episode)
 
         logger.info("Training complete.")
 
     def save_checkpoint(self, step: int):
-        save_path = (
-            pathlib.Path(self.config.get("grpo", {}).get("checkpoint_dir", "./checkpoints"))
-            / f"grpo_chess_step_{step}"
-        )
+        save_path = self.checkpoint_dir / f"grpo_chess_step_{step}"
         save_path.mkdir(parents=True, exist_ok=True)
         self.policy_model.save_pretrained(save_path)
         self.tokenizer.save_pretrained(save_path)

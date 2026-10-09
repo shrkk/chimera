@@ -297,6 +297,27 @@ async def _run(args: argparse.Namespace) -> bool:
 
     passes_gate = lmcr_ok and winrate_ok
     print(f"Overall gate: {'PASS ✓' if passes_gate else 'FAIL ✗'}\n")
+
+    if getattr(args, "output", None):
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "checkpoint": args.checkpoint,
+            "opponent": args.opponent,
+            "games_played": total,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "win_rate": win_rate,
+            "bayes_elo_diff": elo_diff,
+            "lmcr": lmcr,
+            "passes_gate": passes_gate,
+            "game_records": game_records,
+        }
+        with out_path.open("w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Saved evaluation results to %s", out_path)
+
     return passes_gate
 
 
@@ -317,6 +338,8 @@ def main() -> None:
     parser.add_argument("--config",       default="config.yaml")
     parser.add_argument("--device",       default="cpu",
                         help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--output",       default="results/maia_match_eval.json",
+                        help="Path to save JSON match results")
     args = parser.parse_args()
 
     passed = asyncio.run(_run(args))

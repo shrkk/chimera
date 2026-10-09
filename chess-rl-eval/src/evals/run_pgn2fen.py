@@ -244,6 +244,30 @@ def evaluate_pgn2fen(args: argparse.Namespace) -> bool:
     status = "PASS ✓" if passes_gate else "FAIL ✗"
     print(f"Overall gate (≥{PASS_THRESHOLD:.0%} at ply ≤ {PASS_PLY_LIMIT}): {status}\n")
 
+    if getattr(args, "output", None):
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "model_path": args.model_path,
+            "target_plies": target_plies,
+            "results": {
+                str(ply): {
+                    "correct": results[ply]["correct"],
+                    "total": results[ply]["total"],
+                    "accuracy": (
+                        results[ply]["correct"] / results[ply]["total"]
+                        if results[ply]["total"] > 0
+                        else 0.0
+                    ),
+                }
+                for ply in target_plies
+            },
+            "passes_gate": passes_gate,
+        }
+        with out_path.open("w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Saved evaluation results to %s", out_path)
+
     return passes_gate
 
 
@@ -260,6 +284,7 @@ def main() -> None:
     parser.add_argument("--pgn-file", default=None, help="Optional path to a local .pgn file")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--device", default="cpu", help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--output", default="results/pgn2fen_eval.json", help="Path to save JSON results")
     args = parser.parse_args()
 
     passed = evaluate_pgn2fen(args)

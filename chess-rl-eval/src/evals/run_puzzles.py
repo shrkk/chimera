@@ -205,6 +205,30 @@ def evaluate_puzzles(args: argparse.Namespace) -> bool:
 
     print("=" * 60)
     print(f"Overall gate: {'PASS ✓' if passes_gate else 'FAIL ✗'}\n")
+
+    if getattr(args, "output", None):
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "model_path": args.model_path,
+            "bands": {
+                name: {
+                    "correct": band_results[name]["correct"],
+                    "total": band_results[name]["total"],
+                    "pass_at_1": (
+                        band_results[name]["correct"] / band_results[name]["total"]
+                        if band_results[name]["total"] > 0
+                        else 0.0
+                    ),
+                }
+                for name, _, _ in ELO_BANDS
+            },
+            "passes_gate": passes_gate,
+        }
+        with out_path.open("w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Saved evaluation results to %s", out_path)
+
     return passes_gate
 
 
@@ -223,6 +247,7 @@ def main() -> None:
                         help="Path to puzzles JSONL file")
     parser.add_argument("--config",  default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--device",  default="cpu", help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--output",  default="results/puzzles_eval.json", help="Path to save JSON results")
     args = parser.parse_args()
 
     passed = evaluate_puzzles(args)
