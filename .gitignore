@@ -23,9 +23,9 @@ share/python-wheels/
 
 # Virtual Environments
 .venv/
-venv/
-ENV/
-env/
+/venv/
+/.env/
+/env/
 
 # Pytest / Coverage
 .pytest_cache/

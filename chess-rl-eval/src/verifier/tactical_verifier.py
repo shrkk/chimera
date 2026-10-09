@@ -6,7 +6,7 @@ Static Exchange Evaluation (SEE), and quiescence search.
 """
 
 import chess
-from typing import Optional
+from typing import Optional, List, Set
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -19,7 +19,7 @@ PIECE_VALUES = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Spec-exact implementation (Section 4)
+# Spec-exact implementation (Section 4) with robustness fixes
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_tactical_safety(board: chess.Board, move: chess.Move) -> float:
@@ -53,10 +53,10 @@ def evaluate_tactical_safety(board: chess.Board, move: chess.Move) -> float:
             if board.piece_at(sq)
         )
         if min_opp_val < piece_val:
-            score -= piece_val - min_opp_val
+            score -= (piece_val - min_opp_val)
 
     # 3. Detect free material hanging for the opponent on reply
-    for legal_reply in board.legal_moves:
+    for legal_reply in list(board.legal_moves):
         if board.is_en_passant(legal_reply) or board.is_capture(legal_reply):
             victim = board.piece_at(legal_reply.to_square)
             if victim and victim.piece_type == chess.QUEEN and not board.is_check():
@@ -68,14 +68,22 @@ def evaluate_tactical_safety(board: chess.Board, move: chess.Move) -> float:
     return score
 
 
-def select_best_candidate(board: chess.Board, candidate_ucis: list[str]) -> chess.Move:
+def select_best_candidate(board: chess.Board, candidate_ucis: List[str]) -> chess.Move:
     """Ranks LLM-suggested candidate moves via symbolic verification."""
-    valid_candidates: list[chess.Move] = []
+    if not board.legal_moves:
+        return chess.Move.null()
+
+    valid_candidates: List[chess.Move] = []
+    seen_ucis: Set[str] = set()
+
     for uci in candidate_ucis:
+        if not uci or uci in seen_ucis:
+            continue
         try:
             m = chess.Move.from_uci(uci)
             if m in board.legal_moves:
                 valid_candidates.append(m)
+                seen_ucis.add(uci)
         except ValueError:
             continue
 
@@ -83,12 +91,14 @@ def select_best_candidate(board: chess.Board, candidate_ucis: list[str]) -> ches
         # Fallback: return the first legal move
         return next(iter(board.legal_moves))
 
-    # Score candidates: Prioritise LLM rank unless symbolic check flags a blunder
+    # Score candidates: Prioritize LLM rank unless symbolic check flags a blunder
     best_move = valid_candidates[0]
     best_score = evaluate_tactical_safety(board, best_move)
 
     for idx, move in enumerate(valid_candidates[1:], start=1):
-        score = evaluate_tactical_safety(board, move) - (idx * 15.0)  # Prior rank penalty
+        raw_score = evaluate_tactical_safety(board, move)
+        # Apply prior rank penalty
+        score = raw_score - (idx * 15.0)
         if score > best_score:
             best_score = score
             best_move = move
@@ -135,7 +145,7 @@ def quiescence_search(
     if depth == 0 or board.is_game_over():
         return stand_pat
 
-    for move in board.legal_moves:
+    for move in list(board.legal_moves):
         if not (board.is_capture(move) or move.promotion):
             continue
         board.push(move)
@@ -174,9 +184,8 @@ def static_exchange_evaluation(board: chess.Board, move: chess.Move) -> int:
 
     # Simulate the exchange
     board.push(move)
-    # Best the opponent can do by recapturing
     best_opp_recapture = 0
-    for reply in board.legal_moves:
+    for reply in list(board.legal_moves):
         if board.is_capture(reply) and reply.to_square == to_sq:
             board.push(reply)
             recapture_gain = attacker_val - static_exchange_evaluation(board, reply)
