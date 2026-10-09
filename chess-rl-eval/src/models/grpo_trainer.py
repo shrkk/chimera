@@ -297,10 +297,6 @@ class GRPOTrainer:
             scaled_loss.backward()
 
             if episode % grad_accum_steps == 0:
-                if self.device.type == "mps":
-                    for p in self.policy_model.parameters():
-                        if p.grad is not None:
-                            p.grad.data = p.grad.data.to(torch.float32)
                 torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)
                 self.optimizer.step()
                 self.scheduler.step()
@@ -338,6 +334,7 @@ def main():
     parser.add_argument("--max-cot-tokens", type=int, help="Max tokens for Chain of Thought generation")
     parser.add_argument("--learning-rate", type=float, help="Learning rate")
     parser.add_argument("--episodes", type=int, help="Number of training episodes")
+    parser.add_argument("--save-every", type=int, help="Checkpoint interval (episodes)")
     parser.add_argument("--stockfish-threads", type=int, help="Number of Stockfish threads")
 
     args = parser.parse_args()
@@ -360,6 +357,8 @@ def main():
         config["grpo"]["learning_rate"] = args.learning_rate
     if args.episodes:
         config["grpo"]["episodes"] = args.episodes
+    if args.save_every:
+        config["grpo"]["save_every"] = args.save_every
     if args.stockfish_threads:
         config["grpo"]["stockfish_threads"] = args.stockfish_threads
 
