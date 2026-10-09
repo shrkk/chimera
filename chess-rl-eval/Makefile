@@ -20,7 +20,7 @@ venv:
 
 install: venv
 	$(PIP) install torch transformers vllm python-chess zstandard pyyaml \
-	              pytest aiosqlite requests tqdm numpy stockfish
+	              pytest aiosqlite requests tqdm numpy stockfish peft
 
 # ── Data Ingestion ─────────────────────────────────────────────────────────────
 .PHONY: download-puzzles test-cache
