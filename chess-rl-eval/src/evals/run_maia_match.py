@@ -52,14 +52,24 @@ THINK_TIME_SEC   = 1.0   # time per move for the engine opponent
 class LLMAgent:
     """Wraps the LLM + neuro-symbolic verifier into a chess agent."""
 
-    def __init__(self, checkpoint: str, device: str = "cpu") -> None:
+    def __init__(self, checkpoint: str, device: str = "auto") -> None:
+        import torch
         from transformers import pipeline  # type: ignore
 
-        logger.info("Loading LLM agent from %s on %s …", checkpoint, device)
+        if device == "auto" or not device:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+
+        logger.info("Loading LLM agent from %s on %s (dtype=auto) …", checkpoint, device)
         self._pipe = pipeline(
             "text-generation",
             model=checkpoint,
             device=device,
+            torch_dtype="auto",
             max_new_tokens=300,
             do_sample=False,
             truncation=True,

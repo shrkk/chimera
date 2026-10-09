@@ -73,15 +73,25 @@ def load_puzzles(path: Path, limit: int) -> list[dict]:
     return puzzles
 
 
-def load_pipeline(model_path: str, device: str):
+def load_pipeline(model_path: str, device: str = "auto"):
     """Load a HuggingFace text-generation pipeline."""
+    import torch
     from transformers import pipeline  # type: ignore
 
-    logger.info("Loading model %s on %s …", model_path, device)
+    if device == "auto" or not device:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+
+    logger.info("Loading model %s on %s (dtype=auto) …", model_path, device)
     pipe = pipeline(
         "text-generation",
         model=model_path,
         device=device,
+        torch_dtype="auto",
         max_new_tokens=300,
         do_sample=False,
         truncation=True,
