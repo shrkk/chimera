@@ -123,6 +123,21 @@ class GRPOTrainer:
         self._encoder = StateEncoder()
         self.env = ChessGym(config=self.config)
 
+        # Load puzzles dataset if available
+        puzzle_file = pathlib.Path(
+            self.config.get("datasets", {}).get("puzzle_output", "datasets/puzzles.jsonl")
+        )
+        self.puzzles = []
+        if puzzle_file.exists():
+            with open(puzzle_file, "r") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            self.puzzles.append(json.loads(line))
+                        except Exception:
+                            pass
+            logger.info("Loaded %d tactical puzzles for GRPO training.", len(self.puzzles))
+
         self.group_size = grpo_cfg.get("group_size", 4)
         self.max_cot_tokens = model_cfg.get("max_cot_tokens", 80)
         self.learning_rate = float(grpo_cfg.get("learning_rate", 5e-6))
@@ -151,11 +166,15 @@ class GRPOTrainer:
 
     def rollout(self, board_state: dict) -> list[dict]:
         """
-        Samples G completions from policy in a single batched generate call,
-        steps ChessGym, and collects rewards.
+        Samples G completions from policy in a single batched generate call.
+        All G completions are evaluated from the exact same initial board state.
         """
-        board = chess.Board(board_state.get("fen", chess.STARTING_FEN))
-        prompt = self._encoder.encode(board, last_moves=board_state.get("last_moves", []))
+        initial_fen = board_state.get("fen", chess.STARTING_FEN)
+        initial_solution = list(board_state.get("puzzle_solution", []))
+        initial_last_moves = list(board_state.get("last_moves", []))
+
+        board = chess.Board(initial_fen)
+        prompt = self._encoder.encode(board, last_moves=initial_last_moves)
         prompt_ids = self._tokenize_prompt(prompt)
         prompt_len = prompt_ids.shape[1]
 
@@ -177,6 +196,8 @@ class GRPOTrainer:
                 num_return_sequences=self.group_size,
             )
 
+        from src.verifier.tactical_verifier import select_best_candidate
+
         completions = []
         for i in range(self.group_size):
             output_ids = output_ids_batch[i : i + 1]
@@ -184,11 +205,16 @@ class GRPOTrainer:
                 output_ids[0][prompt_len:], skip_special_tokens=True
             )
 
-            # Extract candidates or move tag
+            # Reset env to the exact same initial state for this completion
+            eval_board = chess.Board(initial_fen)
+            self.env.reset(fen=initial_fen, puzzle_solution=initial_solution)
+
+            # Extract candidates and select best via neuro-symbolic verifier
             try:
                 candidates = parse_candidates(generated_text)
                 if candidates:
-                    action = candidates[0].strip()
+                    best_move = select_best_candidate(eval_board, candidates)
+                    action = best_move.uci()
                 else:
                     action = generated_text.split("<move>")[-1].split("</move>")[0].strip()
                 _, reward, _, _ = self.env.step(action)
@@ -215,7 +241,16 @@ class GRPOTrainer:
         grad_accum_steps = self.config.get("grpo", {}).get("gradient_accumulation_steps", 1)
 
         for episode in range(1, self.episodes + 1):
-            board_state = self.env.reset()
+            if self.puzzles:
+                puzzle = self.puzzles[(episode - 1) % len(self.puzzles)]
+                board_state = self.env.reset(
+                    fen=puzzle.get("fen"),
+                    puzzle_solution=puzzle.get("moves", []),
+                )
+                board_state["puzzle_solution"] = puzzle.get("moves", [])
+            else:
+                board_state = self.env.reset()
+
             completions = self.rollout(board_state)
 
             max_len = max(len(c["input_ids"]) for c in completions)
