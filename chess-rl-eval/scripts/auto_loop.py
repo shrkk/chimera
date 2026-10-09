@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--episodes-per-round", type=int, default=500, help="Episodes per round")
     parser.add_argument("--eval-limit", type=int, default=200, help="Puzzles per evaluation")
     parser.add_argument("--target-pass", type=float, default=0.65, help="Target Pass@1 for 1100-1400 band")
+    parser.add_argument("--tier3-games", type=int, default=10, help="Practice games to play vs Maia if puzzle gate passes")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
 
     args = parser.parse_args()
@@ -182,9 +183,21 @@ def main():
         # ── Step 4: Auto-sync results to GitHub ──────────────────────────────
         sync_to_github(round_num, target_band_pass)
 
-        # ── Step 5: Adaptive Parameter Tuning ────────────────────────────────
+        # ── Step 5: Gate Check & Tier 3 Practice Match ───────────────────────
         if target_band_pass >= args.target_pass:
-            logger.info("🎯 Target gate achieved! (%.1f%% >= %.1f%%) Loop complete!", target_band_pass * 100, args.target_pass * 100)
+            logger.info("🎯 Target puzzle gate achieved! (%.1f%% >= %.1f%%)", target_band_pass * 100, args.target_pass * 100)
+            logger.info("🏆 Launching Tier 3 Practice Match vs. Maia-1300 (%d games)...", args.tier3_games)
+            tier3_output = results_dir / f"round_{round_num}_maia_match_eval.json"
+            tier3_cmd = [
+                sys.executable,
+                "src/evals/run_maia_match.py",
+                "--checkpoint", str(latest_chkpt),
+                "--games", str(args.tier3_games),
+                "--device", "auto",
+                "--output", str(tier3_output),
+            ]
+            run_command(tier3_cmd, f"Tier 3 Practice Match vs Maia-1300 ({args.tier3_games} games)")
+            sync_to_github(round_num, target_band_pass)
             break
         elif target_band_pass > best_score:
             logger.info("✨ New best model achieved (%.1f%% > %.1f%%)! Maintaining learning momentum.", target_band_pass * 100, best_score * 100)
