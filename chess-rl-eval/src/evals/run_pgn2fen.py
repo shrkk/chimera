@@ -295,7 +295,7 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=100, help="Number of games to evaluate")
     parser.add_argument("--pgn-file", default=None, help="Optional path to a local .pgn file")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--device", default="cpu", help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--device", default="auto", help="Inference device: auto / cpu / cuda / mps")
     parser.add_argument("--output", default="results/pgn2fen_eval.json", help="Path to save JSON results")
     args = parser.parse_args()
 

@@ -348,8 +348,8 @@ def main() -> None:
     parser.add_argument("--weights",      default=None,
                         help="Path to Maia network weights file (.pb.gz)")
     parser.add_argument("--config",       default="config.yaml")
-    parser.add_argument("--device",       default="cpu",
-                        help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--device",       default="auto",
+                        help="Inference device: auto / cpu / cuda / mps")
     parser.add_argument("--output",       default="results/maia_match_eval.json",
                         help="Path to save JSON match results")
     args = parser.parse_args()

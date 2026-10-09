@@ -258,7 +258,7 @@ def main() -> None:
     parser.add_argument("--puzzle-file", default=DEFAULT_PUZZLE_FILE,
                         help="Path to puzzles JSONL file")
     parser.add_argument("--config",  default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--device",  default="cpu", help="Inference device: cpu / cuda / mps")
+    parser.add_argument("--device",  default="auto", help="Inference device: auto / cpu / cuda / mps")
     parser.add_argument("--output",  default="results/puzzles_eval.json", help="Path to save JSON results")
     args = parser.parse_args()
 
