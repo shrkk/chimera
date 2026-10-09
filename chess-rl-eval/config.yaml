@@ -5,7 +5,7 @@
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
-  base_model: "Qwen/Qwen2.5-Coder-7B-Instruct"
+  base_model: "Qwen/Qwen2.5-Coder-0.5B-Instruct"
   checkpoint_dir: "./checkpoints"
   max_new_tokens: 256        # hard cap on full generation
   max_cot_tokens: 80         # verbosity penalty kicks in above this
@@ -18,13 +18,13 @@ grpo:
   learning_rate: 5.0e-6
   beta_kl: 0.04              # KL penalty coefficient
   clip_epsilon: 0.2          # PPO clipping range
-  episodes: 5000
+  episodes: 500
   batch_size: 8
   gradient_accumulation_steps: 4
-  warmup_steps: 100
-  save_every: 500            # checkpoint interval (episodes)
+  warmup_steps: 50
+  save_every: 100            # checkpoint interval (episodes)
   stockfish_threads: 4
-  stockfish_depth: 12        # depth for reward shaping evals
+  stockfish_depth: 10        # depth for reward shaping evals
 
 # ── Reward Shaping ─────────────────────────────────────────────────────────────
 reward:
