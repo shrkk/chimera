@@ -64,16 +64,33 @@ class LLMAgent:
             else:
                 device = "cpu"
 
-        logger.info("Loading LLM agent from %s on %s (dtype=auto) …", checkpoint, device)
-        self._pipe = pipeline(
-            "text-generation",
-            model=checkpoint,
-            device=device,
-            torch_dtype="auto",
-            max_new_tokens=300,
-            do_sample=False,
-            truncation=True,
-        )
+        dtype = torch.bfloat16 if device in ["cuda", "mps"] else torch.float32
+        model_dir = Path(checkpoint)
+        if (model_dir / "adapter_config.json").exists():
+            from peft import AutoPeftModelForCausalLM
+            from transformers import AutoTokenizer
+            logger.info("Detected LoRA adapter checkpoint at %s. Loading PEFT model on %s …", checkpoint, device)
+            model = AutoPeftModelForCausalLM.from_pretrained(checkpoint, torch_dtype=dtype).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+            self._pipe = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=300,
+                do_sample=False,
+                truncation=True,
+            )
+        else:
+            logger.info("Loading LLM agent from %s on %s (dtype=auto) …", checkpoint, device)
+            self._pipe = pipeline(
+                "text-generation",
+                model=checkpoint,
+                device=device,
+                torch_dtype="auto",
+                max_new_tokens=300,
+                do_sample=False,
+                truncation=True,
+            )
         self._encoder = StateEncoder()
         self.total_move_attempts  = 0
         self.total_legal_moves    = 0

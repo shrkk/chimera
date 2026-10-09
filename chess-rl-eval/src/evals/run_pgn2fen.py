@@ -89,9 +89,9 @@ def _generate_synthetic_games(n: int = 100) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_pipeline(model_path: str, device: str = "auto"):
-    """Load a HuggingFace text-generation pipeline."""
+    """Load a HuggingFace text-generation pipeline, supporting base models and LoRA adapters."""
     import torch
-    from transformers import pipeline  # type: ignore
+    from transformers import AutoTokenizer, pipeline  # type: ignore
 
     if device == "auto" or not device:
         if torch.cuda.is_available():
@@ -101,16 +101,32 @@ def load_pipeline(model_path: str, device: str = "auto"):
         else:
             device = "cpu"
 
-    logger.info("Loading model %s on %s (dtype=auto) …", model_path, device)
-    pipe = pipeline(
-        "text-generation",
-        model=model_path,
-        device=device,
-        torch_dtype="auto",
-        max_new_tokens=120,
-        do_sample=False,
-        truncation=True,
-    )
+    dtype = torch.bfloat16 if device in ["cuda", "mps"] else torch.float32
+    model_dir = Path(model_path)
+    if (model_dir / "adapter_config.json").exists():
+        from peft import AutoPeftModelForCausalLM
+        logger.info("Detected LoRA adapter checkpoint at %s. Loading PEFT model on %s …", model_path, device)
+        model = AutoPeftModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=120,
+            do_sample=False,
+            truncation=True,
+        )
+    else:
+        logger.info("Loading model %s on %s (dtype=auto) …", model_path, device)
+        pipe = pipeline(
+            "text-generation",
+            model=model_path,
+            device=device,
+            torch_dtype="auto",
+            max_new_tokens=120,
+            do_sample=False,
+            truncation=True,
+        )
     logger.info("Model loaded.")
     return pipe
 

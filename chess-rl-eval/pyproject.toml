@@ -23,6 +23,7 @@ dependencies = [
     "tqdm>=4.66.0",
     "numpy>=1.26.0",
     "stockfish>=3.28.0",
+    "peft>=0.10.0",
 ]
 
 [project.optional-dependencies]

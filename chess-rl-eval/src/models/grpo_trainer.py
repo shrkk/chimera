@@ -13,6 +13,7 @@ import torch
 import yaml
 import chess
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+from peft import LoraConfig, get_peft_model, TaskType
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -65,7 +66,13 @@ def compute_grpo_loss(
 
     # 2. Reference model pass in inference_mode, then free its tensors
     with torch.inference_mode():
-        ref_outputs = ref_model(input_ids=input_ids)
+        if ref_model is not None:
+            ref_outputs = ref_model(input_ids=input_ids)
+        else:
+            # Dynamic LoRA adapter bypass: computes base model reference with 0 extra VRAM
+            with policy_model.disable_adapter():
+                ref_outputs = policy_model(input_ids=input_ids)
+
         ref_logits = ref_outputs.logits[:, start_idx:-1, :].contiguous()
         ref_log_probs = ref_logits.log_softmax(dim=-1)
         token_ref_log_probs = torch.gather(
@@ -121,12 +128,33 @@ class GRPOTrainer:
         self.policy_model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=dtype
         ).to(self.device)
-        self.ref_model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype
-        ).to(self.device)
-        self.ref_model.eval()
-        for param in self.ref_model.parameters():
-            param.requires_grad = False
+
+        lora_cfg = self.config.get("lora", {})
+        self.use_lora = lora_cfg.get("enabled", True)
+
+        if self.use_lora:
+            logger.info("LoRA enabled: wrapping policy model with PEFT adapters.")
+            lora_config = LoraConfig(
+                r=lora_cfg.get("r", 16),
+                lora_alpha=lora_cfg.get("lora_alpha", 32),
+                lora_dropout=lora_cfg.get("lora_dropout", 0.05),
+                target_modules=lora_cfg.get("target_modules", [
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"
+                ]),
+                task_type=TaskType.CAUSAL_LM,
+            )
+            self.policy_model = get_peft_model(self.policy_model, lora_config)
+            self.policy_model.print_trainable_parameters()
+            self.ref_model = None  # Reference logits computed via dynamic adapter disable (0 extra VRAM)
+        else:
+            logger.info("LoRA disabled: loading dedicated reference model copy.")
+            self.ref_model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype
+            ).to(self.device)
+            self.ref_model.eval()
+            for param in self.ref_model.parameters():
+                param.requires_grad = False
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -156,8 +184,9 @@ class GRPOTrainer:
         self.episodes = grpo_cfg.get("episodes", 5000)
         self.save_every = grpo_cfg.get("save_every", 500)
 
+        trainable_params = [p for p in self.policy_model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
-            self.policy_model.parameters(), lr=self.learning_rate
+            trainable_params, lr=self.learning_rate
         )
 
         grad_accum_steps = grpo_cfg.get("gradient_accumulation_steps", 1)
@@ -336,6 +365,8 @@ def main():
     parser.add_argument("--episodes", type=int, help="Number of training episodes")
     parser.add_argument("--save-every", type=int, help="Checkpoint interval (episodes)")
     parser.add_argument("--stockfish-threads", type=int, help="Number of Stockfish threads")
+    parser.add_argument("--no-lora", action="store_true", help="Disable LoRA and train full model parameters")
+    parser.add_argument("--lora-r", type=int, help="LoRA rank dimension r")
 
     args = parser.parse_args()
 
@@ -346,6 +377,13 @@ def main():
         config["model"] = {}
     if "grpo" not in config:
         config["grpo"] = {}
+    if "lora" not in config:
+        config["lora"] = {}
+
+    if args.no_lora:
+        config["lora"]["enabled"] = False
+    if args.lora_r:
+        config["lora"]["r"] = args.lora_r
 
     if args.base_model:
         config["model"]["base_model"] = args.base_model

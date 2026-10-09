@@ -129,3 +129,46 @@ def test_illegal_move_fallback():
     # Should not raise StopIteration, returns null move
     fallback_move = select_best_candidate(checkmate_board, ["e2e4"])
     assert fallback_move == chess.Move.null()
+
+
+def test_compute_grpo_loss_with_adapter_bypass():
+    """Asserts compute_grpo_loss functions with ref_model=None using dynamic disable_adapter."""
+    from unittest.mock import MagicMock
+    from contextlib import contextmanager
+    from src.models.grpo_trainer import compute_grpo_loss
+
+    batch_size = 2
+    seq_len = 8
+    vocab_size = 16
+
+    class DummyPolicy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.device = torch.device("cpu")
+
+        @contextmanager
+        def disable_adapter(self):
+            yield
+
+        def forward(self, input_ids):
+            out = MagicMock()
+            out.logits = torch.ones((input_ids.shape[0], input_ids.shape[1], vocab_size))
+            return out
+
+    policy = DummyPolicy()
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
+    action_masks = torch.ones((batch_size, seq_len))
+    action_masks[:, :3] = 0
+    rewards = torch.tensor([1.0, 2.0])
+
+    loss = compute_grpo_loss(
+        policy_model=policy,
+        ref_model=None,
+        input_ids=input_ids,
+        action_masks=action_masks,
+        rewards=rewards,
+        group_size=2,
+    )
+    assert isinstance(loss, torch.Tensor)
+    assert not torch.isnan(loss)
+    assert loss.ndim == 0
