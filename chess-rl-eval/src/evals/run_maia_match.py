@@ -66,6 +66,18 @@ class LLMAgent:
 
         dtype = torch.bfloat16 if device in ["cuda", "mps"] else torch.float32
         model_dir = Path(checkpoint)
+
+        if not model_dir.exists() and ("checkpoints" in checkpoint or checkpoint.startswith(".") or checkpoint.startswith("/")):
+            chk_dir = Path("checkpoints")
+            avail = sorted([p.name for p in chk_dir.glob("grpo_chess_step_*")]) if chk_dir.exists() else []
+            avail_msg = f"Available checkpoints in ./checkpoints: {avail}" if avail else "No checkpoints found in ./checkpoints."
+            raise FileNotFoundError(
+                f"\n[Chimera Checkpoint Error] Specified path '{checkpoint}' does not exist on disk!\n"
+                f"{avail_msg}\n"
+                f"Hint: Make sure you are inside the project directory (e.g. 'cd /chimera/chess-rl-eval') "
+                f"and specify an existing step checkpoint (e.g. '--checkpoint checkpoints/grpo_chess_step_500')."
+            )
+
         if (model_dir / "adapter_config.json").exists():
             from peft import AutoPeftModelForCausalLM
             from transformers import AutoTokenizer

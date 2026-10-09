@@ -20,15 +20,18 @@ Black: {black_piece_coords}
 === LEGAL ACTION SPACE ===
 [{legal_moves_csv}]
 
-Provide concise tactical reasoning (under 80 tokens) in <reasoning> tags. Then output your ranked candidates in <candidates> tags:
+Format your response as follows:
 <reasoning>
 [Analysis of checks, captures, threats]
 </reasoning>
 <candidates>
-1. <move>e2e4</move>
-2. <move>d2d4</move>
-3. <move>g1f3</move>
-</candidates>"""
+1. <move>uci</move>
+2. <move>uci</move>
+3. <move>uci</move>
+</candidates>
+
+Now analyze the position:
+<reasoning>"""
 
 class StateEncoder:
     def _piece_coord_map(self, board: chess.Board) -> Tuple[str, str]:
@@ -68,4 +71,19 @@ class StateEncoder:
         )
 
 def parse_candidates(text: str) -> List[str]:
-    return re.findall(r'<move>(.*?)</move>', text)
+    # 1. Primary: exact <move>uci</move> tags
+    moves = re.findall(r'<move>\s*([a-h][1-8][a-h][1-8][qrbn]?)\s*</move>', text, re.IGNORECASE)
+    if moves:
+        return [m.lower() for m in moves]
+
+    # 2. Secondary: check inside <candidates> ... </candidates>
+    cand_match = re.search(r'<candidates>(.*?)(?:</candidates>|$)', text, re.DOTALL | re.IGNORECASE)
+    if cand_match:
+        cand_text = cand_match.group(1)
+        cand_moves = re.findall(r'\b([a-h][1-8][a-h][1-8][qrbn]?)\b', cand_text, re.IGNORECASE)
+        if cand_moves:
+            return [m.lower() for m in cand_moves]
+
+    # 3. Fallback: any 4-5 char UCI moves mentioned anywhere in text
+    all_ucis = re.findall(r'\b([a-h][1-8][a-h][1-8][qrbn]?)\b', text, re.IGNORECASE)
+    return [m.lower() for m in all_ucis]

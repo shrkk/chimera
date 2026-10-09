@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import pathlib
+import re
 import sys
 
 # Disable hard upper allocation cap on Apple Silicon unified memory
@@ -258,13 +259,19 @@ class GRPOTrainer:
             # Extract candidates and select best via neuro-symbolic verifier
             try:
                 candidates = parse_candidates(generated_text)
-                if candidates:
-                    best_move = select_best_candidate(eval_board, candidates)
-                    action = best_move.uci()
+                has_move_tags = bool(re.search(r'<move>.*?</move>', generated_text, re.IGNORECASE))
+
+                best_move = select_best_candidate(eval_board, candidates)
+                action = best_move.uci() if best_move != chess.Move.null() else None
+
+                if action is not None and action in [m.uci() for m in eval_board.legal_moves]:
+                    _, reward, _, _ = self.env.step(action)
+                    if not has_move_tags:
+                        reward -= 0.1  # Formatting penalty for omitting <move> tags
                 else:
-                    action = generated_text.split("<move>")[-1].split("</move>")[0].strip()
-                _, reward, _, _ = self.env.step(action)
-            except Exception:
+                    reward = self.config.get("reward", {}).get("terminal_illegal", -1.5)
+            except Exception as e:
+                logger.warning("Step evaluation error: %s", e)
                 reward = self.config.get("reward", {}).get("terminal_illegal", -1.5)
 
             action_mask = self._compute_action_mask(output_ids, prompt_len)

@@ -8,7 +8,7 @@ model:
   base_model: "Qwen/Qwen2.5-Coder-0.5B-Instruct"
   checkpoint_dir: "./checkpoints"
   max_new_tokens: 256        # hard cap on full generation
-  max_cot_tokens: 80         # verbosity penalty kicks in above this
+  max_cot_tokens: 120        # verbosity penalty kicks in above this
   temperature: 0.7
   top_p: 0.9
 
