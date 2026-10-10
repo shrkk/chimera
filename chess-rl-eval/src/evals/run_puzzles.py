@@ -73,10 +73,10 @@ def load_puzzles(path: Path, limit: int) -> list[dict]:
     return puzzles
 
 
-def load_pipeline(model_path: str, device: str = "auto"):
-    """Load a HuggingFace text-generation pipeline, supporting base models and LoRA adapters."""
+def load_eval_model(model_path: str, device: str = "auto"):
+    """Load model directly on device supporting base models and LoRA adapters."""
     import torch
-    from transformers import AutoTokenizer, pipeline  # type: ignore
+    from transformers import AutoTokenizer, AutoModelForCausalLM
 
     if device == "auto" or not device:
         if torch.cuda.is_available():
@@ -102,36 +102,22 @@ def load_pipeline(model_path: str, device: str = "auto"):
 
     if (model_dir / "adapter_config.json").exists():
         from peft import AutoPeftModelForCausalLM
-        logger.info("Detected LoRA adapter checkpoint at %s. Loading PEFT model on %s …", model_path, device)
+        logger.info("Detected LoRA adapter checkpoint at %s. Loading PEFT model on %s (dtype=%s) …", model_path, device, dtype)
         model = AutoPeftModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        pipe = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=300,
-            do_sample=False,
-            truncation=True,
-        )
     else:
-        logger.info("Loading model %s on %s (dtype=auto) …", model_path, device)
-        pipe = pipeline(
-            "text-generation",
-            model=model_path,
-            device=device,
-            torch_dtype="auto",
-            max_new_tokens=300,
-            do_sample=False,
-            truncation=True,
-        )
-    logger.info("Model loaded.")
-    return pipe
+        logger.info("Loading model %s on %s (dtype=%s) …", model_path, device, dtype)
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
 
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-def run_inference(pipe, prompt: str) -> str:
-    """Run inference and return only new tokens."""
-    out = pipe(prompt, return_full_text=False)
-    return out[0]["generated_text"].strip()
+    model.eval()
+    logger.info("Model loaded successfully on %s.", device)
+    return model, tokenizer, device
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,58 +125,69 @@ def run_inference(pipe, prompt: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_puzzles(args: argparse.Namespace) -> bool:
+    import torch
     puzzle_file = Path(getattr(args, "puzzle_file", DEFAULT_PUZZLE_FILE))
     if not puzzle_file.exists():
         logger.error("Puzzle file not found: %s", puzzle_file)
         logger.error("Run: python datasets/download_lichess_puzzles.py first.")
         return False
 
-    puzzles  = load_puzzles(puzzle_file, args.limit)
-    encoder  = StateEncoder()
-    pipe     = load_pipeline(args.model_path, getattr(args, "device", "cpu"))
+    puzzles   = load_puzzles(puzzle_file, args.limit)
+    encoder   = StateEncoder()
+    model, tokenizer, device = load_eval_model(args.model_path, getattr(args, "device", "auto"))
+    batch_size = getattr(args, "batch_size", 16)
 
     band_results: dict[str, dict] = defaultdict(lambda: {"correct": 0, "total": 0})
 
-    for puzzle in tqdm(puzzles, desc="Solving puzzles"):
-        fen         = puzzle.get("fen", "")
-        sol_moves   = puzzle.get("moves", [])   # first move is the puzzle's first move
-        rating      = int(puzzle.get("rating", 0))
-        band        = _elo_band(rating)
-
+    # Filter valid puzzles
+    valid_puzzles: list[tuple[dict, chess.Board]] = []
+    for puzzle in puzzles:
+        fen       = puzzle.get("fen", "")
+        sol_moves = puzzle.get("moves", [])
         if not fen or not sol_moves:
             continue
-
         try:
             board = chess.Board(fen)
+            valid_puzzles.append((puzzle, board))
         except ValueError:
             logger.warning("Invalid FEN skipped: %s", fen)
             continue
 
-        # The puzzle already starts after the opponent's move, so the first
-        # element of sol_moves is the correct reply we want to predict.
-        correct_uci = sol_moves[0]
+    # Batched inference across GPU
+    for i in tqdm(range(0, len(valid_puzzles), batch_size), desc=f"Solving puzzles (batch_size={batch_size})"):
+        chunk = valid_puzzles[i : i + batch_size]
+        prompts = [encoder.encode(board, last_moves=[]) for _, board in chunk]
 
-        # Build dual-rep prompt
-        prompt = encoder.encode(board, last_moves=[])
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(device)
 
-        # LLM inference
-        try:
-            raw        = run_inference(pipe, prompt)
-            candidates = parse_candidates(raw)
-        except Exception as exc:
-            logger.warning("Inference error: %s", exc)
-            candidates = []
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=100,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
 
-        # Neuro-symbolic verifier selects best legal candidate
-        try:
-            best_move = select_best_candidate(board, candidates)
-            pred_uci  = best_move.uci()
-        except Exception as exc:
-            logger.warning("Verifier error: %s", exc)
-            pred_uci = ""
+        gen_tokens = outputs[:, inputs["input_ids"].shape[1] :]
+        completions = tokenizer.batch_decode(gen_tokens, skip_special_tokens=True)
 
-        band_results[band]["total"]   += 1
-        band_results[band]["correct"] += int(pred_uci == correct_uci)
+        for (puzzle, board), raw in zip(chunk, completions):
+            sol_moves   = puzzle.get("moves", [])
+            rating      = int(puzzle.get("rating", 0))
+            band        = _elo_band(rating)
+            correct_uci = sol_moves[0]
+
+            candidates = parse_candidates(raw.strip())
+            try:
+                best_move = select_best_candidate(board, candidates)
+                pred_uci  = best_move.uci()
+            except Exception as exc:
+                logger.warning("Verifier error: %s", exc)
+                pred_uci = ""
+
+            band_results[band]["total"]   += 1
+            band_results[band]["correct"] += int(pred_uci == correct_uci)
 
     # ── Summary table ─────────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -218,8 +215,9 @@ def evaluate_puzzles(args: argparse.Namespace) -> bool:
     print("=" * 60)
     print(f"Overall gate: {'PASS ✓' if passes_gate else 'FAIL ✗'}\n")
 
-    if getattr(args, "output", None):
-        out_path = Path(args.output)
+    out_file = getattr(args, "output", None)
+    if out_file:
+        out_path = Path(out_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         summary = {
             "model_path": args.model_path,
@@ -255,6 +253,8 @@ def main() -> None:
     parser.add_argument("--model-path", required=True, help="HuggingFace model ID or local path")
     parser.add_argument("--limit",       type=int, default=200,
                         help="Max puzzles to evaluate (default 200)")
+    parser.add_argument("--batch-size",  type=int, default=16,
+                        help="Batch size for parallel GPU inference (default 16)")
     parser.add_argument("--puzzle-file", default=DEFAULT_PUZZLE_FILE,
                         help="Path to puzzles JSONL file")
     parser.add_argument("--config",  default="config.yaml", help="Path to config.yaml")
