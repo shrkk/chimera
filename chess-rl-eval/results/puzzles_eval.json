@@ -1,0 +1,21 @@
+{
+  "model_path": "checkpoints/grpo_chess_step_500",
+  "bands": {
+    "800_1100": {
+      "correct": 10,
+      "total": 59,
+      "pass_at_1": 0.1694915254237288
+    },
+    "1100_1400": {
+      "correct": 11,
+      "total": 72,
+      "pass_at_1": 0.1527777777777778
+    },
+    "1400_1700": {
+      "correct": 5,
+      "total": 67,
+      "pass_at_1": 0.07462686567164178
+    }
+  },
+  "passes_gate": false
+}
