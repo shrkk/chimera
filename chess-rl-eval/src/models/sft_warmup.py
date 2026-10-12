@@ -208,6 +208,8 @@ def run_sft_warmup(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
         logger.info("Gradient checkpointing enabled for SFT.")
@@ -222,13 +224,14 @@ def run_sft_warmup(
         collate_fn=lambda b: collate_sft_batch(b, tokenizer.pad_token_id),
     )
 
-    total_steps = len(dataloader) * epochs
+    grad_accum_steps = 4
+    total_opt_steps = (len(dataloader) * epochs) // grad_accum_steps
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=max(5, total_steps // 10), num_training_steps=total_steps
+        optimizer, num_warmup_steps=max(5, total_opt_steps // 10), num_training_steps=total_opt_steps
     )
 
-    logger.info("Starting SFT training: %d epochs (%d total steps, batch_size=%d) …", epochs, total_steps, batch_size)
+    logger.info("Starting SFT training: %d epochs (%d total batches, batch_size=%d, accum=%d) …", epochs, len(dataloader) * epochs, batch_size, grad_accum_steps)
     model.train()
 
     step_count = 0
@@ -247,12 +250,13 @@ def run_sft_warmup(
                 labels=labels,
             )
             loss = outputs.loss
-            loss.backward()
+            (loss / grad_accum_steps).backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            if step_count % grad_accum_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             pbar.set_postfix({
@@ -280,7 +284,7 @@ def main():
     parser.add_argument("--output-dir", default="checkpoints/sft_chess_7b", help="Output directory for SFT adapter")
     parser.add_argument("--puzzle-file", default="datasets/puzzles.jsonl", help="Path to puzzles.jsonl")
     parser.add_argument("--epochs", type=int, default=2, help="Number of SFT epochs (default 2)")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for GPU (default 8 for 7B)")
+    parser.add_argument("--batch-size", type=int, default=2, help="Batch size for GPU (default 2 for 7B)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default 2e-4)")
     parser.add_argument("--device", default="auto", help="Device: auto / cuda / cpu")
 
