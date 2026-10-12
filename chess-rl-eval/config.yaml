@@ -11,7 +11,7 @@ model:
   max_cot_tokens: 120        # verbosity penalty kicks in above this
   temperature: 0.7
   top_p: 0.9
-  gradient_checkpointing: false  # disabled on 48GB GPU for maximum training speed
+  gradient_checkpointing: true  # guarantees rock-solid stability for G=12 completions
 
 # ── GRPO Training ─────────────────────────────────────────────────────────────
 grpo:
