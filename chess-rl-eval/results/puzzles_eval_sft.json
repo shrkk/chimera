@@ -1,0 +1,21 @@
+{
+  "model_path": "checkpoints/sft_chess_7b",
+  "bands": {
+    "800_1100": {
+      "correct": 21,
+      "total": 59,
+      "pass_at_1": 0.3559322033898305
+    },
+    "1100_1400": {
+      "correct": 26,
+      "total": 72,
+      "pass_at_1": 0.3611111111111111
+    },
+    "1400_1700": {
+      "correct": 17,
+      "total": 67,
+      "pass_at_1": 0.2537313432835821
+    }
+  },
+  "passes_gate": false
+}

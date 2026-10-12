@@ -238,6 +238,7 @@ def run_sft_warmup(
     lora_r: int = 16,
     lora_alpha: int = 32,
     device: str = "auto",
+    gradient_checkpointing: bool = False,
 ) -> None:
     if device == "auto":
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -246,6 +247,11 @@ def run_sft_warmup(
 
     logger.info("Initializing SFT Warmup on device: %s", dev)
     dtype = torch.bfloat16 if dev.type == "cuda" else torch.float32
+
+    if dev.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        logger.info("TF32 enabled for CUDA acceleration.")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "right"
@@ -261,6 +267,7 @@ def run_sft_warmup(
             logger.info("FlashAttention-2 enabled for fast training.")
         except ImportError:
             model_kwargs["attn_implementation"] = "sdpa"
+            logger.info("PyTorch SDPA enabled for fast training.")
 
     logger.info("Loading base model: %s …", model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(dev)
@@ -273,11 +280,14 @@ def run_sft_warmup(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
-    if hasattr(model, "enable_input_require_grads"):
-        model.enable_input_require_grads()
-    if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
-        logger.info("Gradient checkpointing enabled for SFT.")
+    if gradient_checkpointing:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled for SFT.")
+    else:
+        logger.info("Gradient checkpointing disabled for high-throughput SFT.")
     model.print_trainable_parameters()
 
     encoder = StateEncoder()
@@ -352,6 +362,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size for GPU (default 2 for 7B)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default 2e-4)")
     parser.add_argument("--device", default="auto", help="Device: auto / cuda / cpu")
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=False, help="Enable activation checkpointing (saves VRAM, slower)")
 
     args = parser.parse_args()
 
@@ -363,6 +374,7 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         device=args.device,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
 
 

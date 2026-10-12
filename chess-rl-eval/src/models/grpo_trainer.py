@@ -117,6 +117,9 @@ class GRPOTrainer:
         # Device selection: prefer MPS > CUDA > CPU
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            logger.info("TF32 enabled for CUDA acceleration.")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             self.device = torch.device("mps")
         else:
@@ -129,8 +132,18 @@ class GRPOTrainer:
 
         dtype = torch.bfloat16 if self.device.type in ["mps", "cuda"] else torch.float32
 
+        model_kwargs: dict[str, Any] = {"torch_dtype": dtype}
+        if self.device.type == "cuda":
+            try:
+                import flash_attn  # noqa: F401
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+                logger.info("FlashAttention-2 enabled for GRPO policy model.")
+            except ImportError:
+                model_kwargs["attn_implementation"] = "sdpa"
+                logger.info("PyTorch SDPA enabled for GRPO policy model.")
+
         self.policy_model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype
+            model_name, **model_kwargs
         ).to(self.device)
 
         lora_cfg = self.config.get("lora", {})
@@ -156,11 +169,19 @@ class GRPOTrainer:
                     task_type=TaskType.CAUSAL_LM,
                 )
                 self.policy_model = get_peft_model(self.policy_model, lora_config)
-            if hasattr(self.policy_model, "enable_input_require_grads"):
-                self.policy_model.enable_input_require_grads()
-            if hasattr(self.policy_model, "gradient_checkpointing_enable"):
-                self.policy_model.gradient_checkpointing_enable()
-                logger.info("Gradient checkpointing enabled: activation VRAM reduced.")
+
+            use_grad_ckpt = (
+                model_cfg.get("gradient_checkpointing", False)
+                or lora_cfg.get("gradient_checkpointing", False)
+            )
+            if use_grad_ckpt:
+                if hasattr(self.policy_model, "enable_input_require_grads"):
+                    self.policy_model.enable_input_require_grads()
+                if hasattr(self.policy_model, "gradient_checkpointing_enable"):
+                    self.policy_model.gradient_checkpointing_enable()
+                    logger.info("Gradient checkpointing enabled: activation VRAM reduced.")
+            else:
+                logger.info("Gradient checkpointing disabled for maximum training throughput.")
 
             self.policy_model.print_trainable_parameters()
             self.ref_model = None  # Reference logits computed via dynamic adapter disable (0 extra VRAM)
@@ -428,6 +449,7 @@ def main():
     parser.add_argument("--stockfish-threads", type=int, help="Number of Stockfish threads")
     parser.add_argument("--no-lora", action="store_true", help="Disable LoRA and train full model parameters")
     parser.add_argument("--lora-r", type=int, help="LoRA rank dimension r")
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=False, help="Enable activation checkpointing (saves VRAM, slower)")
 
     args = parser.parse_args()
 
@@ -440,6 +462,11 @@ def main():
         config["grpo"] = {}
     if "lora" not in config:
         config["lora"] = {}
+
+    if args.gradient_checkpointing:
+        config["model"]["gradient_checkpointing"] = True
+    elif "gradient_checkpointing" not in config["model"]:
+        config["model"]["gradient_checkpointing"] = False
 
     if args.no_lora:
         config["lora"]["enabled"] = False
