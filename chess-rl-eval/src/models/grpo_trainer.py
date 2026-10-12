@@ -33,6 +33,7 @@ def compute_grpo_loss(
     policy_model,
     ref_model,
     input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
     action_masks: torch.Tensor,
     rewards: torch.Tensor,
     group_size: int,
@@ -47,6 +48,7 @@ def compute_grpo_loss(
     rewards = rewards.to(device)
     action_masks = action_masks.to(device)
     input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
 
     # 1. Compute Group Advantages per-group [Batch_Size, Group_Size]
     rewards = rewards.view(-1, group_size)
@@ -68,11 +70,11 @@ def compute_grpo_loss(
     # 2. Reference model pass in inference_mode, then free its tensors
     with torch.inference_mode():
         if ref_model is not None:
-            ref_outputs = ref_model(input_ids=input_ids)
+            ref_outputs = ref_model(input_ids=input_ids, attention_mask=attention_mask)
         else:
             # Dynamic LoRA adapter bypass: computes base model reference with 0 extra VRAM
             with policy_model.disable_adapter():
-                ref_outputs = policy_model(input_ids=input_ids)
+                ref_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
 
         ref_logits = ref_outputs.logits[:, start_idx:-1, :].contiguous()
         ref_log_probs = ref_logits.log_softmax(dim=-1)
@@ -84,15 +86,15 @@ def compute_grpo_loss(
             torch.mps.empty_cache()
 
     # 3. Active policy model pass
-    policy_outputs = policy_model(input_ids=input_ids)
+    policy_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
     policy_logits = policy_outputs.logits[:, start_idx:-1, :].contiguous()
     policy_log_probs = policy_logits.log_softmax(dim=-1)
     token_log_probs = torch.gather(
         policy_log_probs, -1, sliced_labels.unsqueeze(-1)
     ).squeeze(-1)
 
-    # 4. Token-level KL divergence approximation: exp(ref - policy) - (ref - policy) - 1
-    diff = token_ref_log_probs - token_log_probs
+    # 4. Token-level KL divergence approximation with numerical clamp
+    diff = torch.clamp(token_ref_log_probs - token_log_probs, -10.0, 10.0)
     kl = torch.exp(diff) - diff - 1.0
 
     # 5. GRPO policy gradient loss with advantage broadcasting
@@ -108,8 +110,9 @@ def compute_grpo_loss(
 
 
 class GRPOTrainer:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, init_adapter: str | None = None):
         self.config = config
+        self.init_adapter_path = init_adapter or self.config.get("lora", {}).get("init_adapter")
 
         # Device selection: prefer MPS > CUDA > CPU
         if torch.cuda.is_available():
@@ -134,18 +137,25 @@ class GRPOTrainer:
         self.use_lora = lora_cfg.get("enabled", True)
 
         if self.use_lora:
-            logger.info("LoRA enabled: wrapping policy model with PEFT adapters.")
-            lora_config = LoraConfig(
-                r=lora_cfg.get("r", 16),
-                lora_alpha=lora_cfg.get("lora_alpha", 32),
-                lora_dropout=lora_cfg.get("lora_dropout", 0.05),
-                target_modules=lora_cfg.get("target_modules", [
-                    "q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"
-                ]),
-                task_type=TaskType.CAUSAL_LM,
-            )
-            self.policy_model = get_peft_model(self.policy_model, lora_config)
+            if self.init_adapter_path and pathlib.Path(self.init_adapter_path).exists():
+                from peft import PeftModel
+                logger.info("LoRA enabled: loading pre-trained SFT adapter from %s", self.init_adapter_path)
+                self.policy_model = PeftModel.from_pretrained(
+                    self.policy_model, self.init_adapter_path, is_trainable=True
+                )
+            else:
+                logger.info("LoRA enabled: wrapping policy model with fresh PEFT adapters.")
+                lora_config = LoraConfig(
+                    r=lora_cfg.get("r", 16),
+                    lora_alpha=lora_cfg.get("lora_alpha", 32),
+                    lora_dropout=lora_cfg.get("lora_dropout", 0.05),
+                    target_modules=lora_cfg.get("target_modules", [
+                        "q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"
+                    ]),
+                    task_type=TaskType.CAUSAL_LM,
+                )
+                self.policy_model = get_peft_model(self.policy_model, lora_config)
             self.policy_model.print_trainable_parameters()
             self.ref_model = None  # Reference logits computed via dynamic adapter disable (0 extra VRAM)
         else:
@@ -321,6 +331,7 @@ class GRPOTrainer:
 
             batch_input_ids = torch.stack(batch_input_ids)
             batch_action_masks = torch.stack(batch_action_masks)
+            batch_attention_mask = (batch_input_ids != self.tokenizer.pad_token_id).long()
             batch_rewards = torch.tensor(
                 batch_rewards, dtype=torch.float32, device=self.device
             )
@@ -329,6 +340,7 @@ class GRPOTrainer:
                 self.policy_model,
                 self.ref_model,
                 batch_input_ids,
+                batch_attention_mask,
                 batch_action_masks,
                 batch_rewards,
                 self.group_size,
@@ -380,6 +392,7 @@ def main():
     parser = argparse.ArgumentParser(description="GRPO Trainer for Chess RL")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--base-model", type=str, help="Base model name or path")
+    parser.add_argument("--init-adapter", type=str, help="Path to pre-trained SFT LoRA adapter checkpoint")
     parser.add_argument("--group-size", type=int, help="Number of completions per prompt (G)")
     parser.add_argument("--max-cot-tokens", type=int, help="Max tokens for Chain of Thought generation")
     parser.add_argument("--learning-rate", type=float, help="Learning rate")
@@ -408,6 +421,8 @@ def main():
 
     if args.base_model:
         config["model"]["base_model"] = args.base_model
+    if args.init_adapter:
+        config["lora"]["init_adapter"] = args.init_adapter
     if args.group_size:
         config["grpo"]["group_size"] = args.group_size
     if args.max_cot_tokens:
@@ -421,7 +436,7 @@ def main():
     if args.stockfish_threads:
         config["grpo"]["stockfish_threads"] = args.stockfish_threads
 
-    trainer = GRPOTrainer(config)
+    trainer = GRPOTrainer(config, init_adapter=args.init_adapter)
     trainer.train()
 
 

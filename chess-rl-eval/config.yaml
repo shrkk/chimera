@@ -5,7 +5,7 @@
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
-  base_model: "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+  base_model: "Qwen/Qwen2.5-Coder-7B-Instruct"
   checkpoint_dir: "./checkpoints"
   max_new_tokens: 256        # hard cap on full generation
   max_cot_tokens: 120        # verbosity penalty kicks in above this
@@ -14,14 +14,14 @@ model:
 
 # ── GRPO Training ─────────────────────────────────────────────────────────────
 grpo:
-  group_size: 4              # G completions sampled per board state
-  learning_rate: 5.0e-6
+  group_size: 8              # G completions sampled per board state (raised from 4 for 7B)
+  learning_rate: 2.0e-5      # 2e-5 for stable LoRA fine-tuning with warm cold-start
   beta_kl: 0.04              # KL penalty coefficient
   clip_epsilon: 0.2          # PPO clipping range
   episodes: 500
   batch_size: 8
   gradient_accumulation_steps: 4
-  warmup_steps: 50
+  warmup_steps: 15           # 15 optimizer updates of linear warmup
   save_every: 100            # checkpoint interval (episodes)
   stockfish_threads: 4
   stockfish_depth: 10        # depth for reward shaping evals
@@ -29,6 +29,7 @@ grpo:
 # ── LoRA (Low-Rank Adaptation) ────────────────────────────────────────────────
 lora:
   enabled: true
+  init_adapter: "checkpoints/sft_chess_7b"  # initialized from SFT Cold-Start Warmup
   r: 16
   lora_alpha: 32
   lora_dropout: 0.05

@@ -39,6 +39,7 @@ cache/
 checkpoints/
 *.zst
 datasets/puzzles.jsonl
+*.log
 
 # OS
 .DS_Store
