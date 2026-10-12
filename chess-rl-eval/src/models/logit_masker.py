@@ -112,14 +112,11 @@ class LogitMasker(LogitsProcessor):
                     allowed_tokens = self._get_allowed_tokens(prefix)
 
                     if allowed_tokens and len(allowed_tokens) < scores.shape[-1]:
-                        mask = torch.ones(
-                            scores.shape[-1], dtype=torch.bool, device=scores.device
-                        )
                         allowed_tensor = torch.tensor(
                             list(allowed_tokens), dtype=torch.long, device=scores.device
                         )
-                        mask[allowed_tensor] = False
-                        # Use -1e4 instead of -inf to avoid NaN/overflow on MPS/bfloat16
-                        scores[i, mask] = -1e4
+                        keep_scores = scores[i, allowed_tensor].clone()
+                        scores[i, :] = -1e4
+                        scores[i, allowed_tensor] = keep_scores
 
         return scores

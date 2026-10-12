@@ -208,6 +208,9 @@ def run_sft_warmup(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled for SFT.")
     model.print_trainable_parameters()
 
     encoder = StateEncoder()
@@ -277,7 +280,7 @@ def main():
     parser.add_argument("--output-dir", default="checkpoints/sft_chess_7b", help="Output directory for SFT adapter")
     parser.add_argument("--puzzle-file", default="datasets/puzzles.jsonl", help="Path to puzzles.jsonl")
     parser.add_argument("--epochs", type=int, default=2, help="Number of SFT epochs (default 2)")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for GPU (default 16)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for GPU (default 8 for 7B)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default 2e-4)")
     parser.add_argument("--device", default="auto", help="Device: auto / cuda / cpu")
 

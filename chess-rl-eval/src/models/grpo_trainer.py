@@ -156,6 +156,10 @@ class GRPOTrainer:
                     task_type=TaskType.CAUSAL_LM,
                 )
                 self.policy_model = get_peft_model(self.policy_model, lora_config)
+            if hasattr(self.policy_model, "gradient_checkpointing_enable"):
+                self.policy_model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled: activation VRAM reduced.")
+
             self.policy_model.print_trainable_parameters()
             self.ref_model = None  # Reference logits computed via dynamic adapter disable (0 extra VRAM)
         else:
@@ -209,7 +213,7 @@ class GRPOTrainer:
         total_steps = self.episodes // grad_accum_steps
         self.scheduler = get_cosine_schedule_with_warmup(
             self.optimizer,
-            num_warmup_steps=grpo_cfg.get("warmup_steps", 100),
+            num_warmup_steps=grpo_cfg.get("warmup_steps", 15),
             num_training_steps=max(total_steps, 1),
         )
 
@@ -217,8 +221,29 @@ class GRPOTrainer:
         return self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
 
     def _compute_action_mask(self, input_ids: torch.Tensor, prompt_len: int) -> torch.Tensor:
+        """
+        Computes binary action mask for completions.
+        Tokens in prompt are 0.
+        Generated tokens up to and including the first EOS are 1.
+        All trailing pad tokens are 0.
+        """
         mask = torch.zeros_like(input_ids)
-        mask[:, prompt_len:] = 1
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id
+
+        for i in range(input_ids.shape[0]):
+            seq = input_ids[i]
+            if eos_id is not None:
+                eos_positions = (seq[prompt_len:] == eos_id).nonzero()
+                if len(eos_positions) > 0:
+                    first_eos = prompt_len + eos_positions[0].item()
+                    mask[i, prompt_len : first_eos + 1] = 1
+                    continue
+
+            mask[i, prompt_len:] = 1
+            if pad_id is not None:
+                mask[i, seq == pad_id] = 0
+
         return mask
 
     def rollout(self, board_state: dict) -> list[dict]:
