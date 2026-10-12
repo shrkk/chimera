@@ -156,6 +156,8 @@ class GRPOTrainer:
                     task_type=TaskType.CAUSAL_LM,
                 )
                 self.policy_model = get_peft_model(self.policy_model, lora_config)
+            if hasattr(self.policy_model, "enable_input_require_grads"):
+                self.policy_model.enable_input_require_grads()
             if hasattr(self.policy_model, "gradient_checkpointing_enable"):
                 self.policy_model.gradient_checkpointing_enable()
                 logger.info("Gradient checkpointing enabled: activation VRAM reduced.")
