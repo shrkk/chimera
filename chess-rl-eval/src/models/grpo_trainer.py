@@ -73,11 +73,17 @@ def compute_grpo_loss(
     # 2. Reference model pass in inference_mode, then free its tensors
     with torch.inference_mode():
         if ref_model is not None:
-            ref_outputs = ref_model(input_ids=input_ids, attention_mask=attention_mask)
+            try:
+                ref_outputs = ref_model(input_ids=input_ids, attention_mask=attention_mask)
+            except TypeError:
+                ref_outputs = ref_model(input_ids=input_ids)
         else:
             # Dynamic LoRA adapter bypass: computes base model reference with 0 extra VRAM
             with policy_model.disable_adapter():
-                ref_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
+                try:
+                    ref_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
+                except TypeError:
+                    ref_outputs = policy_model(input_ids=input_ids)
 
         ref_logits = ref_outputs.logits[:, start_idx:-1, :].contiguous()
         ref_log_probs = ref_logits.log_softmax(dim=-1)
@@ -89,7 +95,10 @@ def compute_grpo_loss(
             torch.mps.empty_cache()
 
     # 3. Active policy model pass
-    policy_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
+    try:
+        policy_outputs = policy_model(input_ids=input_ids, attention_mask=attention_mask)
+    except TypeError:
+        policy_outputs = policy_model(input_ids=input_ids)
     policy_logits = policy_outputs.logits[:, start_idx:-1, :].contiguous()
     policy_log_probs = policy_logits.log_softmax(dim=-1)
     token_log_probs = torch.gather(

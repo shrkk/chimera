@@ -150,7 +150,7 @@ def test_compute_grpo_loss_with_adapter_bypass():
         def disable_adapter(self):
             yield
 
-        def forward(self, input_ids):
+        def forward(self, input_ids, **kwargs):
             out = MagicMock()
             out.logits = torch.ones((input_ids.shape[0], input_ids.shape[1], vocab_size))
             return out
