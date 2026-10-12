@@ -43,6 +43,70 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("SFTWarmup")
 
 
+PIECE_NAMES = {
+    chess.PAWN: "pawn",
+    chess.KNIGHT: "knight",
+    chess.BISHOP: "bishop",
+    chess.ROOK: "rook",
+    chess.QUEEN: "queen",
+    chess.KING: "king",
+}
+
+
+def generate_tactical_cot(board: chess.Board, moves: list[str], themes: list[str]) -> tuple[str, list[str]]:
+    """Generates step-by-step tactical mental calculation and up to 3 candidate moves."""
+    m1 = chess.Move.from_uci(moves[0])
+    piece = board.piece_at(m1.from_square)
+    p_name = PIECE_NAMES.get(piece.piece_type, "piece").capitalize() if piece else "Piece"
+    from_sq = chess.square_name(m1.from_square)
+    to_sq = chess.square_name(m1.to_square)
+    is_cap = board.is_capture(m1)
+    captured = board.piece_at(m1.to_square)
+    cap_name = PIECE_NAMES.get(captured.piece_type, "piece") if captured else "material"
+    gives_check = board.gives_check(m1)
+
+    actions = []
+    if gives_check:
+        actions.append("delivers a forcing check against the king")
+    if is_cap:
+        actions.append(f"captures the opponent's {cap_name} on {to_sq}")
+    if not actions:
+        actions.append(f"infiltrates to {to_sq} seizing key tactical control")
+    action_desc = " and ".join(actions)
+
+    followup_desc = ""
+    if len(moves) >= 3:
+        m2 = chess.Move.from_uci(moves[1])
+        m3 = chess.Move.from_uci(moves[2])
+        followup_desc = f" If the opponent counters with {m2.uci()}, the follow-up {m3.uci()} secures decisive advantage."
+    elif len(moves) == 2:
+        m2 = chess.Move.from_uci(moves[1])
+        followup_desc = f" The opponent's best defense {m2.uci()} is insufficient to equalize."
+
+    theme_str = ", ".join(themes[:3]) if themes else "tactics"
+    reasoning = (
+        f"Analyzing position for {theme_str}: {p_name} on {from_sq} moves to {to_sq}, which {action_desc}."
+        f"{followup_desc} Primary move {m1.uci()} is the critical tactical solution."
+    )
+
+    alts = []
+    for lm in board.legal_moves:
+        if lm != m1 and lm.uci() not in alts:
+            if board.is_capture(lm) or board.gives_check(lm):
+                alts.append(lm.uci())
+            if len(alts) >= 2:
+                break
+    if len(alts) < 2:
+        for lm in board.legal_moves:
+            if lm != m1 and lm.uci() not in alts:
+                alts.append(lm.uci())
+                if len(alts) >= 2:
+                    break
+
+    candidates = [m1.uci()] + alts
+    return reasoning, candidates
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset Definition
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +149,7 @@ class ChessPuzzleSFTDataset(Dataset):
         for p in raw_puzzles:
             fen = p.get("fen", "")
             sol_moves = p.get("moves", [])
+            themes = p.get("themes", [])
             if not fen or not sol_moves:
                 continue
 
@@ -94,16 +159,16 @@ class ChessPuzzleSFTDataset(Dataset):
                 continue
 
             winning_move_uci = sol_moves[0]
-
-            # Construct system prompt with board state & piece locations
             prompt = self.encoder.encode(board, last_moves=[])
 
-            # Target completion demonstrating concise tactical reasoning and candidate move
+            reasoning_text, candidate_moves = generate_tactical_cot(board, sol_moves, themes)
+
+            cands_str = "\n".join([f"{idx}. <move>{m}</move>" for idx, m in enumerate(candidate_moves, start=1)])
             target_completion = (
-                f"\nIdentify checks, captures, and defended tactical squares.\n"
+                f"\n{reasoning_text}\n"
                 f"</reasoning>\n"
                 f"<candidates>\n"
-                f"1. <move>{winning_move_uci}</move>\n"
+                f"{cands_str}\n"
                 f"</candidates>"
             )
 

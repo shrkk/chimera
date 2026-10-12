@@ -14,15 +14,15 @@ model:
 
 # ── GRPO Training ─────────────────────────────────────────────────────────────
 grpo:
-  group_size: 8              # G completions sampled per board state (raised from 4 for 7B)
+  group_size: 12             # G completions sampled per board state (raised to 12 for 32GB RTX 5090)
   learning_rate: 2.0e-5      # 2e-5 for stable LoRA fine-tuning with warm cold-start
   beta_kl: 0.04              # KL penalty coefficient
   clip_epsilon: 0.2          # PPO clipping range
-  episodes: 500
-  batch_size: 8
+  episodes: 2500             # Deep multi-epoch RL training across all 1200 puzzles
+  batch_size: 12
   gradient_accumulation_steps: 4
-  warmup_steps: 15           # 15 optimizer updates of linear warmup
-  save_every: 100            # checkpoint interval (episodes)
+  warmup_steps: 25           # 25 updates of linear warmup
+  save_every: 250            # checkpoint every 250 episodes
   stockfish_threads: 4
   stockfish_depth: 10        # depth for reward shaping evals
 
