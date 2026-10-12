@@ -226,10 +226,22 @@ async def play_game(
     else:
         result_str = outcome.result()
 
+    game = chess.pgn.Game()
+    game.headers["Event"] = "Chimera Tier 3 Match"
+    game.headers["White"] = "Chimera-7B" if llm_plays_white else "Stockfish-1300"
+    game.headers["Black"] = "Stockfish-1300" if llm_plays_white else "Chimera-7B"
+    game.headers["Result"] = result_str
+    node = game
+    for m in board.move_stack:
+        node = node.add_variation(m)
+    pgn_str = str(game)
+
     return {
         "result":          result_str,
         "llm_legal_moves": llm_agent.total_legal_moves,
         "num_moves":       num_moves,
+        "moves_uci":       [m.uci() for m in board.move_stack],
+        "pgn":             pgn_str,
         "forfeited":       False,
     }
 
@@ -272,6 +284,11 @@ async def _run(args: argparse.Namespace) -> bool:
             record = await play_game(agent, engine, llm_white)
             game_records.append(record)
 
+            if "pgn" in record:
+                print(f"\n=== GAME {game_idx + 1} PGN ===")
+                print(record["pgn"])
+                print("========================\n")
+
             result = record["result"]
             if result == "1/2-1/2":
                 draws += 1
@@ -279,6 +296,14 @@ async def _run(args: argparse.Namespace) -> bool:
                 wins += 1
             else:
                 losses += 1
+
+        pgn_out = Path("results/match_games.pgn")
+        pgn_out.parent.mkdir(parents=True, exist_ok=True)
+        with pgn_out.open("w") as pf:
+            for r in game_records:
+                if "pgn" in r:
+                    pf.write(r["pgn"] + "\n\n")
+        logger.info("Saved game PGNs to %s", pgn_out)
     finally:
         await engine.quit()
 
