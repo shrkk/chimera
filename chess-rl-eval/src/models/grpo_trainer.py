@@ -33,10 +33,10 @@ def compute_grpo_loss(
     policy_model,
     ref_model,
     input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
     action_masks: torch.Tensor,
     rewards: torch.Tensor,
     group_size: int,
+    attention_mask: torch.Tensor | None = None,
     beta_kl: float = 0.04,
 ) -> torch.Tensor:
     """
@@ -48,7 +48,10 @@ def compute_grpo_loss(
     rewards = rewards.to(device)
     action_masks = action_masks.to(device)
     input_ids = input_ids.to(device)
-    attention_mask = attention_mask.to(device)
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    else:
+        attention_mask = attention_mask.to(device)
 
     # 1. Compute Group Advantages per-group [Batch_Size, Group_Size]
     rewards = rewards.view(-1, group_size)
@@ -388,10 +391,10 @@ class GRPOTrainer:
                 self.policy_model,
                 self.ref_model,
                 batch_input_ids,
-                batch_attention_mask,
                 batch_action_masks,
                 batch_rewards,
                 self.group_size,
+                attention_mask=batch_attention_mask,
             )
 
             scaled_loss = loss / grad_accum_steps
